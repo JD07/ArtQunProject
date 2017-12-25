@@ -1,5 +1,6 @@
 __author__ = 'JD07'
 
+import matplotlib.pyplot as plt
 import tensorflow as tf
 import numpy as np
 
@@ -16,7 +17,11 @@ import cv2
 import os
 import re
 
+from local_utils import  data_utils
+from global_configuration import config
 from icdar import restore_rectangle
+from crnn_model import crnn_model
+
 import model
 import lanms
 
@@ -70,7 +75,7 @@ def save_result(i, img, rst):
     with open(output_path, 'w') as f:
         json.dump(rst, f)
 
-    return rst
+    return rst, dirPath
 
 def restore_rectangle_rbox(origin, geometry):
     '''
@@ -278,17 +283,16 @@ def get_model_filenames(model_dir):
     return meta_file, ckpt_file
 
 def getPredictor():
-    #该函数用于从ckpt文件中恢复网络，并返回一个可以得到相应图像结果的predictor函数
-    input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
-    global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-
-    f_score, f_geometry = model.model(input_images, is_training=False)
-
-    variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
-    saver = tf.train.Saver(variable_averages.variables_to_restore())
-
-    sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True))
-    load_model(sess, FLAGS.premodel)
+    with tf.Graph().as_default() as net1_graph:
+        #该函数用于从ckpt文件中恢复网络，并返回一个可以得到相应图像结果的predictor函数
+        input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
+        global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
+        f_score, f_geometry = model.model(input_images, is_training=False)
+        variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
+        saver1 = tf.train.Saver(variable_averages.variables_to_restore())
+    
+    sess1 = tf.Session(graph=net1_graph)       
+    saver1.restore(sess=sess1, save_path=FLAGS.eastWeightsPath)
 
     def predictor(img):
         '''
@@ -340,7 +344,7 @@ def getPredictor():
         
         #执行前向传播
         start = time.time()        
-        score, geometry = sess.run(
+        score, geometry = sess1.run(
             [f_score, f_geometry],
             feed_dict={input_images: [im_resized[:,:,::-1]]})
         timer['net'] = time.time() - start
@@ -377,6 +381,42 @@ def getPredictor():
 
     return predictor
 
+def getRecognize():
+    with tf.Graph().as_default() as net2_graph:
+        inputdata = tf.placeholder(dtype=tf.float32, shape=[1, 32, 100, 3], name='input')
+
+        net = crnn_model.ShadowNet(phase='Test', hidden_nums=256, layers_nums=2, seq_length=25, num_classes=19)
+
+        with tf.variable_scope('shadow'):
+            net_out = net.build_shadownet(inputdata=inputdata)
+
+        decodes, _ = tf.nn.ctc_beam_search_decoder(inputs=net_out, sequence_length=25*np.ones(1), merge_repeated=False)
+
+        decoder = data_utils.TextFeatureIO()
+
+        # config tf session
+        sess_config = tf.ConfigProto()
+        sess_config.gpu_options.per_process_gpu_memory_fraction = config.cfg.TRAIN.GPU_MEMORY_FRACTION
+        sess_config.gpu_options.allow_growth = config.cfg.TRAIN.TF_ALLOW_GROWTH
+
+        # config tf saver
+        saver2 = tf.train.Saver()
+
+    sess2 = tf.Session(graph=net2_graph, config=sess_config)   
+    saver2.restore(sess=sess2, save_path=FLAGS.crnnWeightsPath)
+
+    def recognize(path):
+        imageList = getfilelist(path)
+        for imagePath in imageList:
+            image = cv2.imread(imagePath, cv2.IMREAD_COLOR)
+            image = cv2.resize(image, (100, 32))
+            image = np.expand_dims(image, axis=0).astype(np.float32)
+            preds = sess2.run(decodes, feed_dict={inputdata: image})
+            preds = decoder.writer.sparse_tensor_to_str(preds[0])
+            print('Predict image {:s} label {:s}'.format(os.path.split(imagePath)[1], preds[0]))
+    
+    return recognize
+
 
 def main(args):
     #检查输入参数
@@ -393,11 +433,18 @@ def main(args):
     pathList = getfilelist(FLAGS.imgPath)
     #获取前向传播函数
     predictor = getPredictor()
+    #获取识别函数
+    recognize = getRecognize() 
+    
+    #path='result/0'
+    #recognize(path)
+    
     #开始循环
     for i,imgPath in enumerate(pathList):
         img = cv2.imread(imgPath)
         rst = predictor(img)
-        save_result(i, img, rst)
+        _, path = save_result(i, img, rst)
+        recognize(path)
     
 
 
@@ -415,6 +462,14 @@ if __name__ == '__main__':
                         type=str,
                         help='where to save the croped image', 
                         default='result')
+    parser.add_argument('--eastWeightsPath', 
+                        type=str, 
+                        help='Where you store the east weights',
+                        default='premodel/model.ckpt-13975')
+    parser.add_argument('--crnnWeightsPath', 
+                        type=str, 
+                        help='Where you store the crnn weights',
+                        default='crnnModel/myShadownet/shadownet_2017-12-03-23-20.ckpt-31688')
 
     FLAGS, unparsed = parser.parse_known_args()
     main([sys.argv[0]] + unparsed)
