@@ -18,18 +18,22 @@ import os
 import re
 
 from local_utils import  data_utils
-from global_configuration import config
 from icdar import restore_rectangle
-from crnn_model import crnn_model
+from model import east_model #east网络参数
+from model import crnn_model #crnn网络参数
 
-import model
 import lanms
 
-
-FLAGS = None
+FLAGS = None#命令行参数全局变量
 
 def getfilelist(path):
-    #通过该函数遍历文件夹下的jpg等
+    '''
+        该函数用于寻找指定路径下所有图像，并返回路径list
+        输入：
+            path：路径
+        返回：
+            filelist：图片路径组成的list
+    '''
     filelist = []
     for i in os.listdir(path):
         if os.path.isfile(os.path.join(path, i)):#确认是否是文件
@@ -42,6 +46,11 @@ def getfilelist(path):
 def draw_illu(illu, rst):
     '''
         在输入图像illu上，按rst指定的坐标画框
+        输入：
+            illu：图像
+            rst：包含了RBOX坐标的有序dict
+        返回：
+            illu：画好框的图像
     '''
     for t in rst['text_lines']:
         d = np.array([t['x0'], t['y0'], t['x1'], t['y1'], t['x2'],
@@ -52,6 +61,14 @@ def draw_illu(illu, rst):
 
 
 def cropImg(dirPath, img, rst):
+    '''
+        该函数用于将图像按照RBOX坐标进行切割，并将切割后的图像保存到指定路径下
+        输入：
+            dirPath：指定保存的路径
+            img：切割原图
+            rst：包含了RBOX坐标的有序dict
+        返回：
+    '''
     for i,t in enumerate(rst['text_lines']):
         x0 = int(min(t['x0'], t['x1'], t['x2'], t['x3']))
         x1 = int(max(t['x0'], t['x1'], t['x2'], t['x3']))
@@ -62,7 +79,18 @@ def cropImg(dirPath, img, rst):
         rstPath = os.path.join(dirPath, rstName)
         cv2.imwrite(rstPath, rstImg)
 
+
 def save_result(i, img, rst):
+    '''
+        对输入的图像执行切割，并将其rst信息与切割后的图片保存到独立的文件夹下
+        输入：
+            i：用于产生独立文件夹
+            img：图像
+            rst：包含了RBOX坐标等信息的有序dict
+        返回：
+            rst：
+            dirPath：保存切割结果的独立文件夹路径
+    '''
     dirPath = os.path.join(FLAGS.cropPath, str(i))
     if not os.path.exists(dirPath):
         os.makedirs(dirPath)
@@ -79,7 +107,7 @@ def save_result(i, img, rst):
 
 def restore_rectangle_rbox(origin, geometry):
     '''
-    恢复RBOX框
+        恢复RBOX框，非我编写，需要花时间理解
     '''
     d = geometry[:, :4]
     angle = geometry[:, 4]
@@ -154,10 +182,7 @@ def restore_rectangle_rbox(origin, geometry):
 
 def resize_image(im, max_side_len=2400):
     '''
-    resize image to a size multiple of 32 which is required by the network
-    :param im: the resized image
-    :param max_side_len: limit of max image size to avoid out of memory in gpu
-    :return: the resized image and the resize ratio
+        将图像resize，满足指定要求
     '''
     h, w, _ = im.shape
 
@@ -199,6 +224,8 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_
             box_thresh:threshhold for boxes
             nms_thres:threshold for nms
         输出：
+            boxes：
+            timer：
     '''
     if len(score_map.shape) == 4:
         score_map = score_map[0, :, :, 0]
@@ -234,60 +261,12 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_
     return boxes, timer
 
 
-def load_model(sess, model):
-    # Check if the model is a model directory (containing a metagraph and a checkpoint file)
-    #  or if it is a protobuf file with a frozen graph
-    model_exp = os.path.expanduser(model)
-    if (os.path.isfile(model_exp)):
-        print('Model filename: %s' % model_exp)
-        with gfile.FastGFile(model_exp,'rb') as f:
-            graph_def = tf.GraphDef()
-            graph_def.ParseFromString(f.read())
-            tf.import_graph_def(graph_def, name='')
-    else:
-        print('Model directory: %s' % model_exp)
-        meta_file, ckpt_file = get_model_filenames(model_exp)
-        
-        print('Metagraph file: %s' % meta_file)
-        print('Checkpoint file: %s' % ckpt_file)
-      
-        saver = tf.train.import_meta_graph(os.path.join(model_exp, meta_file))
-        saver.restore(sess, os.path.join(model_exp, ckpt_file))
-
-def get_model_filenames(model_dir):
-    '''
-        获取指定路径下meta文件和ckpt文件的路径
-        注意：该函数存在问题，只有特定格式保存的网络可以获取准确的ckpt_file，需要后续修改
-    '''
-    ckpt_file = 'model.ckpt-13975' #函数存在问题，ckpt暂时只能通过手动赋值来保证正常运行
-    files = os.listdir(model_dir)
-
-    #获取meta文件名
-    meta_files = [s for s in files if s.endswith('.meta')]
-    if len(meta_files)==0:
-        raise ValueError('No meta file found in the model directory (%s)' % model_dir)
-    elif len(meta_files)>1:
-        raise ValueError('There should not be more than one meta file in the model directory (%s)' % model_dir)
-    meta_file = meta_files[0]
-    
-    #获取ckpt文件名（目前存在问题）
-    max_step = -1
-    for f in files:
-        step_str = re.match(r'(^model-[\w\- ]+.ckpt-(\d+))', f)
-        if step_str is not None and len(step_str.groups())>=2:
-            step = int(step_str.groups()[1])
-            if step > max_step:
-                max_step = step
-                ckpt_file = step_str.groups()[0]
-
-    return meta_file, ckpt_file
-
 def getPredictor():
+    #该函数用于从ckpt文件中恢复网络，并返回一个可以得到相应图像结果的predictor函数
     with tf.Graph().as_default() as net1_graph:
-        #该函数用于从ckpt文件中恢复网络，并返回一个可以得到相应图像结果的predictor函数
         input_images = tf.placeholder(tf.float32, shape=[None, None, None, 3], name='input_images')
         global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-        f_score, f_geometry = model.model(input_images, is_training=False)
+        f_score, f_geometry = east_model.model(input_images, is_training=False)
         variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
         saver1 = tf.train.Saver(variable_averages.variables_to_restore())
     
@@ -382,6 +361,7 @@ def getPredictor():
     return predictor
 
 def getRecognize():
+    #该函数用于从ckpt文件中恢复网络，并返回一个可以识别图像内容的recognize函数
     with tf.Graph().as_default() as net2_graph:
         inputdata = tf.placeholder(dtype=tf.float32, shape=[1, 32, 100, 3], name='input')
 
@@ -391,21 +371,20 @@ def getRecognize():
             net_out = net.build_shadownet(inputdata=inputdata)
 
         decodes, _ = tf.nn.ctc_beam_search_decoder(inputs=net_out, sequence_length=25*np.ones(1), merge_repeated=False)
-
         decoder = data_utils.TextFeatureIO()
-
-        # config tf session
-        sess_config = tf.ConfigProto()
-        sess_config.gpu_options.per_process_gpu_memory_fraction = config.cfg.TRAIN.GPU_MEMORY_FRACTION
-        sess_config.gpu_options.allow_growth = config.cfg.TRAIN.TF_ALLOW_GROWTH
-
-        # config tf saver
+        
         saver2 = tf.train.Saver()
 
-    sess2 = tf.Session(graph=net2_graph, config=sess_config)   
+    sess2 = tf.Session(graph=net2_graph)   
     saver2.restore(sess=sess2, save_path=FLAGS.crnnWeightsPath)
 
     def recognize(path):
+        '''
+            对指定路径下的所有图像执行crnn网络识别，并在命令行上显示结果
+            输入：
+                path：指定数据集路劲
+            返回：
+        '''
         imageList = getfilelist(path)
         for imagePath in imageList:
             image = cv2.imread(imagePath, cv2.IMREAD_COLOR)
@@ -436,9 +415,6 @@ def main(args):
     #获取识别函数
     recognize = getRecognize() 
     
-    #path='result/0'
-    #recognize(path)
-    
     #开始循环
     for i,imgPath in enumerate(pathList):
         img = cv2.imread(imgPath)
@@ -465,11 +441,11 @@ if __name__ == '__main__':
     parser.add_argument('--eastWeightsPath', 
                         type=str, 
                         help='Where you store the east weights',
-                        default='premodel/model.ckpt-13975')
+                        default='premodel/model1/model.ckpt-13975')
     parser.add_argument('--crnnWeightsPath', 
                         type=str, 
                         help='Where you store the crnn weights',
-                        default='crnnModel/myShadownet/shadownet_2017-12-03-23-20.ckpt-31688')
+                        default='premodel/model2/shadownet_2017-12-03-23-20.ckpt-31688')
 
     FLAGS, unparsed = parser.parse_known_args()
     main([sys.argv[0]] + unparsed)
