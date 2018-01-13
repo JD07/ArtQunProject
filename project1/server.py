@@ -28,6 +28,25 @@ import lanms
 
 FLAGS = None#命令行参数全局变量
 
+def judge(equation):
+    '''
+        此函数用于对识别出来的算式进行逻辑判断
+        输入：
+            equation:string格式的算式
+        返回：
+            True或False
+    '''
+    try:
+        left = equation.split('=')[0]
+        right = equation.split('=')[-1]
+        leftNum = eval(left)
+        rightNum = eval(right)
+        if leftNum == rightNum:
+            return True
+        else:
+            return False
+    except:
+        return False
 
 def getfilelist(path):
     '''
@@ -382,40 +401,40 @@ def getRecognize():
     sess2 = tf.Session(graph=net2_graph)   
     saver2.restore(sess=sess2, save_path=FLAGS.crnnWeightsPath)
 
-    def recognize(path):
+    def recognize(img, rst):
         '''
-            对指定路径下的所有图像执行crnn网络识别，并在命令行上显示结果
+            按照前一级网络定位的结果进行识别，并在图像上进行标记
             输入：
-                path：指定数据集路劲
+                img：需要进行识别的原图
+                rst：含有RBOX坐标的dict
             返回：
+                img：完成识别并进行相应标注的图像
         '''
-
-        resultPath = os.path.join(path, 'result.txt')
-        imageList = getfilelist(path)
-        f=open(resultPath, 'w')
-
-        for i in range(len(imageList)):
-            image = cv2.imread(imageList[i], cv2.IMREAD_COLOR)
-            #image = cv2.imread(imageList[i], 0)
-            image = cv2.resize(image, (100, 32))
-            #image = cv2.adaptiveThreshold(image,255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,23,10)
-            #image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            image = np.expand_dims(image, axis=0).astype(np.float32)
-            preds = sess2.run(decodes, feed_dict={inputdata: image})
-            preds = decoder.writer.sparse_tensor_to_str(preds[0])
-            f.write('{:s} {:s}'.format(os.path.split(imageList[i])[1], preds[0]))
-            f.write('\n')
-        f.close()
-        '''
-        for imagePath in imageList:
-            image = cv2.imread(imagePath, cv2.IMREAD_COLOR)
+        for i,t in enumerate(rst['text_lines']):
+            #先画RBOX框
+            d = np.array([t['x0'], t['y0'], t['x1'], t['y1'], t['x2'],
+                        t['y2'], t['x3'], t['y3']], dtype='int32')
+            d = d.reshape(-1, 2)#按顺序两个元素组成一列，形成四个点的格式
+            cv2.polylines(img, [d], isClosed=True, color=(255, 255, 0))
+            
+            #将RBOX框内内容送入识别器
+            x0 = int(min(t['x0'], t['x1'], t['x2'], t['x3']))
+            x1 = int(max(t['x0'], t['x1'], t['x2'], t['x3']))
+            y0 = int(min(t['y0'], t['y1'], t['y2'], t['y3']))
+            y1 = int(max(t['y0'], t['y1'], t['y2'], t['y3']))
+            offset = (x1-x0)//10 #由于定位存在问题，导致RBOX框的水平宽度经常不足
+            image = img[y0:y1, max(0, x0-offset):x1+offset]
             image = cv2.resize(image, (100, 32))
             image = np.expand_dims(image, axis=0).astype(np.float32)
             preds = sess2.run(decodes, feed_dict={inputdata: image})
             preds = decoder.writer.sparse_tensor_to_str(preds[0])
-            print('Predict image {:s} label {:s}'.format(os.path.split(imagePath)[1], preds[0]))
-        '''
 
+            #根据识别判断对错并显示识别内容
+            if judge(str(preds[0])) == False:
+                img = cv2.putText(img, preds[0], (x1, y1), cv2.FONT_HERSHEY_COMPLEX, 0.4, (255, 0 ,0), True)
+                img = cv2.line(img, (x0, y0), (x1, y1), (0, 0 ,255), thickness=4)
+
+        return img
 
     return recognize
 
@@ -440,8 +459,10 @@ def tcplink(sock, addr, predictor, recognize):
             break
     #对字符串进行截取，舍弃$后的部分
     imagePath = imagePath.split('$')[0]
-    #对字符串进行截取，获得文件名
-    i = os.path.basename(imagePath).split('.')[-2]
+    #根据文件名获得结果保存路径
+    name = os.path.basename(imagePath)
+    rstName = 'new'+name
+    rstPath = os.path.join(os.path.dirname(imagePath), rstName)
 
     #确认目标图像存在
     if not tf.gfile.Exists(imagePath):
@@ -450,8 +471,10 @@ def tcplink(sock, addr, predictor, recognize):
     #读取图片，输入到网络中，获得结果
     img = cv2.imread(imagePath)
     rst = predictor(img)
-    _, path = save_result(i, img, rst)
-    recognize(path)
+    img = recognize(img, rst)
+
+    #保存结果
+    cv2.imwrite(rstPath, img)
 
     #关闭连接
     sock.close()
@@ -467,8 +490,7 @@ def main(args):
     if not os.path.exists(FLAGS.cropPath):
         os.makedirs(FLAGS.cropPath)
 
-    #获取测试图片路径列表
-    pathList = getfilelist(FLAGS.imgPath)
+
     #获取前向传播函数
     predictor = getPredictor()
     #获取识别函数
