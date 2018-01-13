@@ -77,7 +77,8 @@ def cropImg(dirPath, img, rst):
         x1 = int(max(t['x0'], t['x1'], t['x2'], t['x3']))
         y0 = int(min(t['y0'], t['y1'], t['y2'], t['y3']))
         y1 = int(max(t['y0'], t['y1'], t['y2'], t['y3']))
-        rstImg = img[y0:y1, x0:x1]
+        offset = (x1-x0)//8 #由于定位存在问题，导致RBOX框的水平宽度经常不足
+        rstImg = img[y0:y1, max(0, x0-offset):x1+offset]
         rstName = str(i) + '.jpg'
         rstPath = os.path.join(dirPath, rstName)
         cv2.imwrite(rstPath, rstImg)
@@ -368,7 +369,7 @@ def getRecognize():
     with tf.Graph().as_default() as net2_graph:
         inputdata = tf.placeholder(dtype=tf.float32, shape=[1, 32, 100, 3], name='input')
 
-        net = crnn_model.ShadowNet(phase='Test', hidden_nums=256, layers_nums=2, seq_length=25, num_classes=19)
+        net = crnn_model.ShadowNet(phase='Test', hidden_nums=256, layers_nums=2, seq_length=25, num_classes=20)
 
         with tf.variable_scope('shadow'):
             net_out = net.build_shadownet(inputdata=inputdata)
@@ -389,7 +390,23 @@ def getRecognize():
             返回：
         '''
 
+        resultPath = os.path.join(path, 'result.txt')
         imageList = getfilelist(path)
+        f=open(resultPath, 'w')
+
+        for i in range(len(imageList)):
+            image = cv2.imread(imageList[i], cv2.IMREAD_COLOR)
+            #image = cv2.imread(imageList[i], 0)
+            image = cv2.resize(image, (100, 32))
+            #image = cv2.adaptiveThreshold(image,255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,23,10)
+            #image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            image = np.expand_dims(image, axis=0).astype(np.float32)
+            preds = sess2.run(decodes, feed_dict={inputdata: image})
+            preds = decoder.writer.sparse_tensor_to_str(preds[0])
+            f.write('{:s} {:s}'.format(os.path.split(imageList[i])[1], preds[0]))
+            f.write('\n')
+        f.close()
+        '''
         for imagePath in imageList:
             image = cv2.imread(imagePath, cv2.IMREAD_COLOR)
             image = cv2.resize(image, (100, 32))
@@ -397,7 +414,9 @@ def getRecognize():
             preds = sess2.run(decodes, feed_dict={inputdata: image})
             preds = decoder.writer.sparse_tensor_to_str(preds[0])
             print('Predict image {:s} label {:s}'.format(os.path.split(imagePath)[1], preds[0]))
-    
+        '''
+
+
     return recognize
 
 def tcplink(sock, addr, predictor, recognize):
@@ -457,7 +476,7 @@ def main(args):
     
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # 监听端口:
-    s.bind(('0.0.0.0', 9999))
+    s.bind(('0.0.0.0', 9998))
     s.listen(5)
     print('Waiting for connection...')
 
@@ -489,11 +508,11 @@ if __name__ == '__main__':
     parser.add_argument('--eastWeightsPath', 
                         type=str, 
                         help='Where you store the east weights',
-                        default='premodel/model1/model.ckpt-13975')
+                        default='premodel/model1/model.ckpt-122401')
     parser.add_argument('--crnnWeightsPath', 
                         type=str, 
                         help='Where you store the crnn weights',
-                        default='premodel/model2/shadownet_2017-12-03-23-20.ckpt-31688')
+                        default='premodel/model2/shadownet_2018-01-12-17-11-00.ckpt-159000')
 
     FLAGS, unparsed = parser.parse_known_args()
     main([sys.argv[0]] + unparsed)
